@@ -1,6 +1,4 @@
-Tomcat 8.5.11类加载部分源码阅读
-
-# 启动
+# 类加载器初始化
 
 Tomcat的启动入口位于org.apache.catalina.startup.Bootstrap，其main方法调用了init方法:
 
@@ -10,44 +8,32 @@ public void init() throws Exception {
 	Thread.currentThread().setContextClassLoader(catalinaLoader);
 	SecurityClassLoad.securityClassLoad(catalinaLoader);
 	// Load our startup class and call its process() method
-	if (log.isDebugEnabled())
-		log.debug("Loading startup class");
-		Class<?> startupClass =catalinaLoader.loadClass("org.apache.catalina.startup.Catalina");
-        Object startupInstance = startupClass.newInstance();\
-        // Set the shared extensions class loader
-        if (log.isDebugEnabled())
-            log.debug("Setting startup class properties");
-        String methodName = "setParentClassLoader";
-        Class<?> paramTypes[] = new Class[1];
-        paramTypes[0] = Class.forName("java.lang.ClassLoader");
-        Object paramValues[] = new Object[1];
-        paramValues[0] = sharedLoader;
-        Method method =
-            startupInstance.getClass().getMethod(methodName, paramTypes);
-        method.invoke(startupInstance, paramValues);
-        catalinaDaemon = startupInstance;
+	Class<?> startupClass =catalinaLoader.loadClass("org.apache.catalina.startup.Catalina");
+	Object startupInstance = startupClass.newInstance();\
+	// Set the shared extensions class loader
+	String methodName = "setParentClassLoader";
+    Class<?> paramTypes[] = new Class[1];
+    paramTypes[0] = Class.forName("java.lang.ClassLoader");
+    Object paramValues[] = new Object[1];
+    paramValues[0] = sharedLoader;
+    Method method =
+    	startupInstance.getClass().getMethod(methodName, paramTypes);
+	method.invoke(startupInstance, paramValues);
+    catalinaDaemon = startupInstance;
 }
 ```
-
-# 类加载器初始化
 
 initClassLoaders:
 
 ```java
 private void initClassLoaders() {
-	try {
-		commonLoader = createClassLoader("common", null);
-		if( commonLoader == null ) {
-			// no config file, default to this loader - we might be in a 'single' env.
-			commonLoader=this.getClass().getClassLoader();
-		}
-		catalinaLoader = createClassLoader("server", commonLoader);
-		sharedLoader = createClassLoader("shared", commonLoader);
-	} catch (Throwable t) {
-		handleThrowable(t);
-		log.error("Class loader creation threw exception", t);
-		System.exit(1);
+	commonLoader = createClassLoader("common", null);
+	if( commonLoader == null ) {
+		// no config file, default to this loader - we might be in a 'single' env.
+		commonLoader=this.getClass().getClassLoader();
 	}
+	catalinaLoader = createClassLoader("server", commonLoader);
+	sharedLoader = createClassLoader("shared", commonLoader);
 }
 ```
 
@@ -72,28 +58,14 @@ private ClassLoader createClassLoader(String name, ClassLoader parent) throws Ex
 	List<Repository> repositories = new ArrayList<>();
 	String[] repositoryPaths = getPaths(value);
 	for (String repository : repositoryPaths) {
-		// Check for a JAR URL repository
-		try {
-			@SuppressWarnings("unused")
-			URL url = new URL(repository);
-			repositories.add(
-					new Repository(repository, RepositoryType.URL));
-			continue;
-		} catch (MalformedURLException e) {
-			// Ignore
-		}
 		// Local repository
 		if (repository.endsWith("*.jar")) {
-			repository = repository.substring
-				(0, repository.length() - "*.jar".length());
-			repositories.add(
-					new Repository(repository, RepositoryType.GLOB));
+			repository = repository.substring(0, repository.length() - "*.jar".length());
+			repositories.add(new Repository(repository, RepositoryType.GLOB));
 		} else if (repository.endsWith(".jar")) {
-			repositories.add(
-					new Repository(repository, RepositoryType.JAR));
+			repositories.add(new Repository(repository, RepositoryType.JAR));
 		} else {
-			repositories.add(
-					new Repository(repository, RepositoryType.DIR));
+			repositories.add(new Repository(repository, RepositoryType.DIR));
 		}
 	}
 	return ClassLoaderFactory.createClassLoader(repositories, parent);
@@ -101,3 +73,60 @@ private ClassLoader createClassLoader(String name, ClassLoader parent) throws Ex
 ```
 
 以下进行分部分说明。
+
+## 配置读取
+
+Tomcat使用配置文件**catalina.properties**来确定每个类加载器负责加载的路径/jar包。CatalinaProperties类负责此配置的读取，源码不再贴出，只说明一下查找此配置的路径顺序:
+
+- 如果设置了环境变量catalina.config，那么去其指定的位置查找
+- 去tomcat的conf目录下查找，一般都是走的这一步
+- 去包/org/apache/catalina/startup/下查找
+
+我们以CommonLoader为例，相关配置如下:
+
+```properties
+common.loader="${catalina.base}/lib","${catalina.base}/lib/*.jar","${catalina.home}/lib","${catalina.home}/lib/*.jar"
+```
+
+replace方法负责占位符的替换。
+
+## 加载器创建
+
+逻辑在于ClassLoaderFactory.createClassLoader方法:
+
+将路径转换为URL，并构造一个URLClassLoader对象返回。所以Tomcat的类加载器其实都是URLClassLoader实例。其类图:
+
+![URLClassLoader类图](images/URLClassLoader.jpg)
+
+## 加载范围
+
+我们来看一下每个加载器负责的范围。
+
+### CommonClassLoader
+
+在配置读取一节中我们已经见过common.loader的内容了。结合debug可以证实，其负责的就是Tomcat目录下的lib文件夹。
+
+### ServerClassLoader
+
+配置:
+
+```properties
+server.loader=
+```
+
+结合注释可以发现，如果此处值为空，那么使用CommonClassLoader作为ServerClassLoader。
+
+### SharedClassLoader
+
+配置:
+
+```properties
+shared.loader=
+```
+
+处理方式同上。
+
+# Tomcat启动
+
+启动其实就是对Catalina的load和start方法的先后反射调用。
+
